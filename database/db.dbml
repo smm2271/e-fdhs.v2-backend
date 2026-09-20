@@ -1,0 +1,173 @@
+Project e_fdhs {
+  database_type: "PostgreSQL"
+  Note: "新版數位校園帳號、組織與權限模型"
+}
+
+
+// ============================================================
+// Groups
+//
+// 表示帳號所屬的組織與權限作用範圍（Scope）。
+//
+// Permission 回答「能做什麼」；
+// Group 則協助判斷「能對誰做」。
+// ============================================================
+
+Table groups {
+  id uuid [pk]
+
+  // 例如：class、office、department
+  type varchar(32) [not null]
+
+  // 例如：320、電腦中心、總務處
+  name varchar(255) [not null]
+  // 供搜尋使用，決定是否要向下查找
+  propagate_confirmation boolean [not null, default: true]
+  // 支援組織階層；最上層可為 NULL
+  parent_id uuid [ref: > groups.id]
+
+  created_at timestamp [not null]
+}
+
+
+// ============================================================
+// Positions
+//
+// 表示登入時選擇的「職務」。
+// 例如：一般學生、班代表、資訊股長、教師。
+//
+// permissions 為此職務提供的基礎權限。
+// 每個 bit 對應一項 Permission。
+// ============================================================
+
+Table positions {
+  id uuid [pk]
+
+  name varchar(255) [not null, unique]
+
+  // 職務的基礎 Permission bitmask
+  permissions bigint [not null, default: 0]
+
+  description text
+}
+
+
+// ============================================================
+// Accounts
+//
+// 一筆 Account 代表一個可登入的 Identity。
+//
+// 新版維持「帳號 + 職務 + 密碼」登入。
+// 因此 (account, position_id) 共同構成登入識別。
+//
+// 例如：
+// (320, 一般學生)
+// (320, 班代表)
+// (320, 資訊股長)
+//
+// 是三個不同的登入 Identity。
+// ============================================================
+
+Table accounts {
+  // 系統內部使用 UUID 識別
+  id uuid [pk]
+
+  // 登入時輸入的帳號，例如 ciallo、s320......
+  account varchar(64) [not null]
+
+  // 登入時選擇的職務
+  position_id uuid [not null, ref: > positions.id]
+
+  password_hash varchar(255) [not null]
+
+  // 帳號所屬的組織 Scope
+  group_id uuid [ref: > groups.id, not null]
+
+  // 教師等個人帳號可填姓名；
+  // 學生共用帳號不需要，因此允許 NULL
+  display_name varchar(255)
+
+  is_active boolean [not null, default: true]
+
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    // 同一帳號可有不同職務，
+    // 但相同「帳號 + 職務」只能存在一次
+    (account, position_id) [unique]
+  }
+}
+
+
+// ============================================================
+// Roles
+//
+// Role 是可額外賦予 Account 的一組 Permission。
+// 一個 Role 的所有權限同樣壓成一個 BIGINT。
+// ============================================================
+
+Table roles {
+  id uuid [pk]
+
+  name varchar(255) [not null, unique]
+
+  // Role 提供的 Permission bitmask
+  permissions bigint [not null, default: 0]
+
+  description text
+}
+
+
+// ============================================================
+// Account Roles
+//
+// Account 與 Role 為多對多關係。
+// 一個 Account 可以同時擁有多個 Role。
+// ============================================================
+
+Table account_roles {
+  account_id uuid [not null, ref: > accounts.id]
+  role_id uuid [not null, ref: > roles.id]
+
+  created_at timestamp [not null]
+
+  indexes {
+    (account_id, role_id) [pk]
+  }
+}
+
+
+// ============================================================
+// Permission Overrides
+//
+// 處理單一 Account 的例外權限。
+//
+// allow_permissions：額外開啟的 bits
+// deny_permissions ：額外關閉的 bits
+//
+// 支援有效期間，因此可以實作限時授權。
+// ============================================================
+
+Table permission_overrides {
+  id uuid [pk]
+
+  account_id uuid [not null, ref: > accounts.id]
+
+  // 額外授予的 Permission
+  allow_permissions bigint [not null, default: 0]
+
+  // 額外禁止的 Permission
+  deny_permissions bigint [not null, default: 0]
+
+  // Override 原因，供管理與追蹤使用
+  reason text
+
+  // NULL 表示立即生效
+  starts_at timestamp
+
+  // NULL 表示無預定失效時間
+  expires_at timestamp
+
+  created_at timestamp [not null]
+}
