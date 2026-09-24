@@ -171,3 +171,13 @@ Table permission_overrides {
 
   created_at timestamp [not null]
 }
+
+Table sessions {
+  id uuid [pk]
+  token_hash varchar [unique, not null]
+  account_id uuid [ref: > accounts.id, not null]
+  created_at timestamp [not null]
+  last_used_at timestamp [not null]
+  expires_at timestamp [not null]
+  revoked_at timestamp
+}

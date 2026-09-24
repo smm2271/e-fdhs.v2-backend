@@ -16,9 +16,11 @@ from database.service import (
     AccountService,
     ConflictError,
     GroupService,
+    NotFoundError,
     PermissionOverrideService,
     PositionService,
     RoleService,
+    SessionService,
 )
 
 
@@ -39,7 +41,7 @@ async def empty_database() -> None:
     async with engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE permission_overrides, account_roles, accounts, roles, "
+                "TRUNCATE sessions, permission_overrides, account_roles, accounts, roles, "
                 "positions, groups RESTART IDENTITY"
             )
         )
@@ -55,6 +57,8 @@ async def test_initial_migration_creates_dbml_tables_and_keys() -> None:
                 "account_unique": inspect(sync_connection).get_unique_constraints("accounts"),
                 "account_role_pk": inspect(sync_connection).get_pk_constraint("account_roles"),
                 "account_foreign_keys": inspect(sync_connection).get_foreign_keys("accounts"),
+                "session_unique": inspect(sync_connection).get_unique_constraints("sessions"),
+                "session_foreign_keys": inspect(sync_connection).get_foreign_keys("sessions"),
             }
         )
 
@@ -65,6 +69,7 @@ async def test_initial_migration_creates_dbml_tables_and_keys() -> None:
         "roles",
         "account_roles",
         "permission_overrides",
+        "sessions",
     }.issubset(schema["tables"])
     assert any(
         constraint["column_names"] == ["account", "position_id"]
@@ -75,6 +80,11 @@ async def test_initial_migration_creates_dbml_tables_and_keys() -> None:
         "groups",
         "positions",
     }
+    assert any(
+        constraint["column_names"] == ["token_hash"]
+        for constraint in schema["session_unique"]
+    )
+    assert schema["session_foreign_keys"][0]["referred_table"] == "accounts"
 
 
 @pytest.mark.asyncio
@@ -167,3 +177,39 @@ async def test_unique_assignments_and_database_updated_at() -> None:
         refreshed = await accounts.get(account.id)
         assert refreshed.created_at is not None
         assert refreshed.updated_at > original_updated_at
+
+
+@pytest.mark.asyncio
+async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
+    async with AsyncSessionLocal() as session:
+        groups = GroupService(session)
+        positions = PositionService(session)
+        accounts = AccountService(session)
+        sessions = SessionService(session)
+
+        group = await groups.create(group_type="class", name="Class 103")
+        position = await positions.create(name="session-test")
+        account = await accounts.create(
+            account="320003",
+            position_id=position.id,
+            password_hash="already-hashed",
+            group_id=group.id,
+        )
+        now = datetime.now(timezone.utc)
+        active = await sessions.create(
+            account_id=account.id,
+            token_hash="hashed-active-token",
+            expires_at=now + timedelta(minutes=5),
+        )
+        resolved = await sessions.get_active_by_token_hash(
+            active.token_hash, now=now
+        )
+        assert resolved.id == active.id
+
+        touched = await sessions.touch(active.id, used_at=now)
+        assert touched.last_used_at == now.replace(tzinfo=None)
+        await sessions.revoke(active.id, revoked_at=now)
+        with pytest.raises(NotFoundError):
+            await sessions.get_active_by_token_hash(active.token_hash, now=now)
+        with pytest.raises(ConflictError):
+            await accounts.delete(account.id)

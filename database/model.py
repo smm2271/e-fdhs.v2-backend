@@ -101,6 +101,9 @@ class Account(Base):
     permission_overrides: Mapped[list["PermissionOverride"]] = relationship(
         back_populates="account", passive_deletes=True
     )
+    sessions: Mapped[list["Session"]] = relationship(
+        back_populates="account", passive_deletes=True
+    )
     roles: Mapped[list["Role"]] = relationship(
         secondary="account_roles", back_populates="accounts", viewonly=True
     )
@@ -157,3 +160,22 @@ class PermissionOverride(Base):
     )
 
     account: Mapped["Account"] = relationship(back_populates="permission_overrides")
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_sessions_token_hash"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=UTC_NOW
+    )
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=UTC_NOW
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False))
+
+    account: Mapped["Account"] = relationship(back_populates="sessions")

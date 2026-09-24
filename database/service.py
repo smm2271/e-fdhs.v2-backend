@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .model import Account, AccountRole, Group, PermissionOverride, Position, Role
+from .model import Account, AccountRole, Group, PermissionOverride, Position, Role, Session
 
 
 class ServiceError(Exception):
@@ -385,8 +385,13 @@ class AccountService:
             .where(PermissionOverride.account_id == account_id)
             .limit(1)
         )
-        if role_id is not None or override_id is not None:
-            raise ConflictError("Cannot delete an account with roles or permission overrides")
+        session_id = await self.session.scalar(
+            select(Session.id).where(Session.account_id == account_id).limit(1)
+        )
+        if role_id is not None or override_id is not None or session_id is not None:
+            raise ConflictError(
+                "Cannot delete an account with roles, permission overrides, or sessions"
+            )
         await self.session.delete(await self.get(account_id))
         await _commit(self.session)
 
@@ -435,6 +440,108 @@ class AccountService:
                 allowed |= override.allow_permissions
                 denied |= override.deny_permissions
         return (permissions | allowed) & ~denied
+
+
+class SessionService:
+    """Persist and manage hashed account-session tokens."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(
+        self, *, account_id: UUID, token_hash: str, expires_at: datetime
+    ) -> Session:
+        await AccountService(self.session).get(account_id)
+        model = Session(
+            id=uuid4(),
+            account_id=account_id,
+            token_hash=token_hash,
+            expires_at=_utc_naive(expires_at),
+        )
+        self.session.add(model)
+        await _commit_and_refresh(self.session, model)
+        return model
+
+    async def get(self, session_id: UUID) -> Session:
+        model = await self.session.get(Session, session_id)
+        if model is None:
+            raise NotFoundError(f"Session {session_id} was not found")
+        return model
+
+    async def get_by_token_hash(self, token_hash: str) -> Session:
+        model = await self.session.scalar(
+            select(Session).where(Session.token_hash == token_hash)
+        )
+        if model is None:
+            raise NotFoundError("Session token was not found")
+        return model
+
+    async def get_active_by_token_hash(
+        self, token_hash: str, *, now: Optional[datetime] = None
+    ) -> Session:
+        current_time = _utc_naive(now) or datetime.now(timezone.utc).replace(tzinfo=None)
+        model = await self.session.scalar(
+            select(Session).where(
+                Session.token_hash == token_hash,
+                Session.revoked_at.is_(None),
+                Session.expires_at > current_time,
+            )
+        )
+        if model is None:
+            raise NotFoundError("Active session token was not found")
+        return model
+
+    async def list_for_account(
+        self, account_id: UUID, *, limit: int = 100, offset: int = 0
+    ) -> list[Session]:
+        _validate_page(limit, offset)
+        result = await self.session.scalars(
+            select(Session)
+            .where(Session.account_id == account_id)
+            .order_by(Session.created_at.desc(), Session.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result)
+
+    async def update(
+        self,
+        session_id: UUID,
+        *,
+        expires_at: datetime | object = _UNSET,
+        last_used_at: datetime | object = _UNSET,
+        revoked_at: Optional[datetime] | object = _UNSET,
+    ) -> Session:
+        model = await self.get(session_id)
+        if expires_at is not _UNSET:
+            model.expires_at = _utc_naive(expires_at)
+        if last_used_at is not _UNSET:
+            model.last_used_at = _utc_naive(last_used_at)
+        if revoked_at is not _UNSET:
+            model.revoked_at = _utc_naive(revoked_at)
+        await _commit_and_refresh(self.session, model)
+        return model
+
+    async def touch(self, session_id: UUID, *, used_at: Optional[datetime] = None) -> Session:
+        return await self.update(
+            session_id,
+            last_used_at=_utc_naive(used_at)
+            or datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+
+    async def revoke(
+        self, session_id: UUID, *, revoked_at: Optional[datetime] = None
+    ) -> Session:
+        return await self.update(
+            session_id,
+            revoked_at=_utc_naive(revoked_at)
+            or datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+
+    async def delete(self, session_id: UUID) -> None:
+        model = await self.get(session_id)
+        await self.session.delete(model)
+        await _commit(self.session)
 
 
 class PermissionOverrideService:
