@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Final, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -188,6 +188,14 @@ class PositionService:
         position = await self.session.get(Position, position_id)
         if position is None:
             raise NotFoundError(f"Position {position_id} was not found")
+        return position
+
+    async def get_by_name(self, name: str) -> Position:
+        position = await self.session.scalar(
+            select(Position).where(Position.name == name)
+        )
+        if position is None:
+            raise NotFoundError(f"Position '{name}' was not found")
         return position
 
     async def list(self, *, limit: int = 100, offset: int = 0) -> list[Position]:
@@ -537,6 +545,22 @@ class SessionService:
             revoked_at=_utc_naive(revoked_at)
             or datetime.now(timezone.utc).replace(tzinfo=None),
         )
+
+    async def revoke_all_for_account(
+        self, account_id: UUID, *, revoked_at: Optional[datetime] = None
+    ) -> int:
+        await AccountService(self.session).get(account_id)
+        revoked_at = _utc_naive(revoked_at) or datetime.now(timezone.utc).replace(
+            tzinfo=None
+        )
+        result = await self.session.execute(
+            update(Session)
+            .where(Session.account_id == account_id, Session.revoked_at.is_(None))
+            .values(revoked_at=revoked_at)
+            .execution_options(synchronize_session=False)
+        )
+        await _commit(self.session)
+        return result.rowcount or 0
 
     async def delete(self, session_id: UUID) -> None:
         model = await self.get(session_id)

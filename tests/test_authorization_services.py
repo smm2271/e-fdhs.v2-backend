@@ -189,6 +189,7 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
 
         group = await groups.create(group_type="class", name="Class 103")
         position = await positions.create(name="session-test")
+        assert (await positions.get_by_name("session-test")).id == position.id
         account = await accounts.create(
             account="320003",
             position_id=position.id,
@@ -211,5 +212,14 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
         await sessions.revoke(active.id, revoked_at=now)
         with pytest.raises(NotFoundError):
             await sessions.get_active_by_token_hash(active.token_hash, now=now)
+
+        second_session = await sessions.create(
+            account_id=account.id,
+            token_hash="hashed-second-token",
+            expires_at=now + timedelta(minutes=5),
+        )
+        assert await sessions.revoke_all_for_account(account.id, revoked_at=now) == 1
+        with pytest.raises(NotFoundError):
+            await sessions.get_active_by_token_hash(second_session.token_hash, now=now)
         with pytest.raises(ConflictError):
             await accounts.delete(account.id)
