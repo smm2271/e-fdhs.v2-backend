@@ -73,14 +73,15 @@ async def update_password(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    account_id = principal.account.id
     # Authentication dependency reads may have started an implicit transaction.
     # They contain no pending writes, so close it before this atomic use case.
     await database_session.rollback()
     async with database_session.begin():
         await AccountService(database_session).update_password_without_commit(
-            principal.account.id, password_hash=await hash_password(payload.new_password)
+            account_id, password_hash=await hash_password(payload.new_password)
         )
         await SessionService(database_session).revoke_all_for_account_without_commit(
-            principal.account.id
+            account_id
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
