@@ -4,6 +4,7 @@ import os
 import dotenv
 
 import pytest
+import pytest_asyncio
 
 dotenv.load_dotenv()
 
@@ -25,7 +26,16 @@ else:
     os.environ.setdefault("DB_USER", "unconfigured")
     os.environ.setdefault("DB_PASSWORD", "unconfigured")
 
+from database.database import engine
+
 
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def dispose_async_engine_after_test() -> None:
+    """Do not reuse asyncpg connections after pytest closes a test event loop."""
+    yield
+    await engine.dispose()
