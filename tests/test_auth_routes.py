@@ -8,9 +8,10 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from database.database import AsyncSessionLocal, engine, get_session
+from database.model import Session
 from database.service import AccountService, GroupService, PositionService, SessionService
 from main import create_app
 from routes.auth import hash_password, hash_token
@@ -141,6 +142,9 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         assert new_password_login.status_code == 200
 
     async with AsyncSessionLocal() as session:
-        persisted_session = await SessionService(session).get_by_token_hash(hash_token(token))
+        persisted_session = await session.scalar(
+            select(Session).where(Session.token_hash == hash_token(token))
+        )
+        assert persisted_session is not None
         assert persisted_session.token_hash != token
         assert persisted_session.revoked_at is not None

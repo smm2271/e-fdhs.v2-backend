@@ -201,14 +201,21 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
             account_id=account.id,
             token_hash="hashed-active-token",
             expires_at=now + timedelta(minutes=5),
+            force_ttl_hours=1,
         )
         resolved = await sessions.get_active_by_token_hash(
             active.token_hash, now=now
         )
         assert resolved.id == active.id
 
-        touched = await sessions.touch(active.id, used_at=now)
+        touched = await sessions.touch(
+            active.id,
+            renewal_ttl=timedelta(hours=2),
+            renewal_window=timedelta(minutes=10),
+            used_at=now,
+        )
         assert touched.last_used_at == now.replace(tzinfo=None)
+        assert touched.expires_at == touched.created_at + timedelta(hours=1)
         await sessions.revoke(active.id, revoked_at=now)
         with pytest.raises(NotFoundError):
             await sessions.get_active_by_token_hash(active.token_hash, now=now)
@@ -217,6 +224,7 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
             account_id=account.id,
             token_hash="hashed-second-token",
             expires_at=now + timedelta(minutes=5),
+            force_ttl_hours=1,
         )
         assert await sessions.revoke_all_for_account(account.id, revoked_at=now) == 1
         with pytest.raises(NotFoundError):

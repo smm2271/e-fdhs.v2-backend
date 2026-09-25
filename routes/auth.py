@@ -35,15 +35,27 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 _password_hasher = PasswordHasher()
 
 
-def _session_ttl() -> timedelta:
-    raw_value = os.getenv("AUTH_SESSION_TTL_HOURS", "24")
+def _duration_from_hours(variable_name: str, default_hours: int) -> timedelta:
+    raw_value = os.getenv(variable_name, str(default_hours))
     try:
         hours = int(raw_value)
     except ValueError as error:
-        raise RuntimeError("AUTH_SESSION_TTL_HOURS must be a positive integer") from error
+        raise RuntimeError(f"{variable_name} must be a positive integer") from error
     if hours <= 0:
-        raise RuntimeError("AUTH_SESSION_TTL_HOURS must be a positive integer")
+        raise RuntimeError(f"{variable_name} must be a positive integer")
     return timedelta(hours=hours)
+
+
+def _session_ttl() -> timedelta:
+    return _duration_from_hours("AUTH_SESSION_TTL_HOURS", 24)
+
+
+def _session_force_ttl() -> timedelta:
+    return _duration_from_hours("AUTH_SESSION_FORCE_TTL_HOURS", 24 * 30)
+
+
+def _session_renewal_window() -> timedelta:
+    return _duration_from_hours("AUTH_SESSION_RENEWAL_WINDOW_HOURS", 12)
 
 
 def _utc_now() -> datetime:
@@ -154,7 +166,14 @@ async def get_current_principal(
     if not account.is_active:
         raise _unauthorized()
 
-    await sessions.touch(current_session.id)
+    try:
+        await sessions.touch(
+            current_session.id,
+            renewal_ttl=_session_ttl(),
+            renewal_window=_session_renewal_window(),
+        )
+    except NotFoundError as error:
+        raise _unauthorized() from error
     return AuthenticatedPrincipal(
         account=account,
         session=current_session,
@@ -192,11 +211,19 @@ async def login(
         )
 
     token = secrets.token_urlsafe(32)
-    expires_at = _utc_now() + _session_ttl()
+    now = _utc_now()
+    session_ttl = _session_ttl()
+    force_ttl = _session_force_ttl()
+    if force_ttl < session_ttl:
+        raise RuntimeError(
+            "AUTH_SESSION_FORCE_TTL_HOURS must be at least AUTH_SESSION_TTL_HOURS"
+        )
+    expires_at = now + session_ttl
     await SessionService(database_session).create(
         account_id=account.id,
         token_hash=hash_token(token),
         expires_at=expires_at,
+        force_ttl_hours=int(force_ttl.total_seconds() // 3600),
     )
     return AccessTokenResponse(access_token=token, expires_at=expires_at)
 

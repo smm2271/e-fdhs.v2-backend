@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Final, Optional
 from uuid import UUID, uuid4
 
@@ -457,14 +457,23 @@ class SessionService:
         self.session = session
 
     async def create(
-        self, *, account_id: UUID, token_hash: str, expires_at: datetime
+        self,
+        *,
+        account_id: UUID,
+        token_hash: str,
+        expires_at: datetime,
+        force_ttl_hours: int,
     ) -> Session:
         await AccountService(self.session).get(account_id)
+        expires_at = _utc_naive(expires_at)
+        if force_ttl_hours <= 0:
+            raise ValidationError("force_ttl_hours must be positive")
         model = Session(
             id=uuid4(),
             account_id=account_id,
             token_hash=token_hash,
-            expires_at=_utc_naive(expires_at),
+            expires_at=expires_at,
+            force_ttl_hours=force_ttl_hours,
         )
         self.session.add(model)
         await _commit_and_refresh(self.session, model)
@@ -474,14 +483,6 @@ class SessionService:
         model = await self.session.get(Session, session_id)
         if model is None:
             raise NotFoundError(f"Session {session_id} was not found")
-        return model
-
-    async def get_by_token_hash(self, token_hash: str) -> Session:
-        model = await self.session.scalar(
-            select(Session).where(Session.token_hash == token_hash)
-        )
-        if model is None:
-            raise NotFoundError("Session token was not found")
         return model
 
     async def get_active_by_token_hash(
@@ -495,7 +496,7 @@ class SessionService:
                 Session.expires_at > current_time,
             )
         )
-        if model is None:
+        if model is None or _session_force_expires_at(model) <= current_time:
             raise NotFoundError("Active session token was not found")
         return model
 
@@ -518,6 +519,7 @@ class SessionService:
         *,
         expires_at: datetime | object = _UNSET,
         last_used_at: datetime | object = _UNSET,
+        force_ttl_hours: int | object = _UNSET,
         revoked_at: Optional[datetime] | object = _UNSET,
     ) -> Session:
         model = await self.get(session_id)
@@ -525,17 +527,50 @@ class SessionService:
             model.expires_at = _utc_naive(expires_at)
         if last_used_at is not _UNSET:
             model.last_used_at = _utc_naive(last_used_at)
+        if force_ttl_hours is not _UNSET:
+            if force_ttl_hours <= 0:
+                raise ValidationError("force_ttl_hours must be positive")
+            model.force_ttl_hours = force_ttl_hours
         if revoked_at is not _UNSET:
             model.revoked_at = _utc_naive(revoked_at)
         await _commit_and_refresh(self.session, model)
         return model
 
-    async def touch(self, session_id: UUID, *, used_at: Optional[datetime] = None) -> Session:
-        return await self.update(
-            session_id,
-            last_used_at=_utc_naive(used_at)
-            or datetime.now(timezone.utc).replace(tzinfo=None),
+    async def touch(
+        self,
+        session_id: UUID,
+        *,
+        renewal_ttl: timedelta,
+        renewal_window: timedelta,
+        used_at: Optional[datetime] = None,
+    ) -> Session:
+        if renewal_ttl <= timedelta(0):
+            raise ValidationError("renewal_ttl must be positive")
+        if renewal_window < timedelta(0):
+            raise ValidationError("renewal_window must be non-negative")
+
+        current_time = _utc_naive(used_at) or datetime.now(timezone.utc).replace(
+            tzinfo=None
         )
+        model = await self.get(session_id)
+        force_expires_at = _session_force_expires_at(model)
+        if (
+            model.revoked_at is not None
+            or model.expires_at <= current_time
+            or force_expires_at <= current_time
+        ):
+            raise NotFoundError("Active session was not found")
+
+        model.last_used_at = current_time
+        if (
+            model.expires_at - current_time <= renewal_window
+            and model.expires_at < force_expires_at
+        ):
+            model.expires_at = min(
+                current_time + renewal_ttl, force_expires_at
+            )
+        await _commit_and_refresh(self.session, model)
+        return model
 
     async def revoke(
         self, session_id: UUID, *, revoked_at: Optional[datetime] = None
@@ -561,12 +596,6 @@ class SessionService:
         )
         await _commit(self.session)
         return result.rowcount or 0
-
-    async def delete(self, session_id: UUID) -> None:
-        model = await self.get(session_id)
-        await self.session.delete(model)
-        await _commit(self.session)
-
 
 class PermissionOverrideService:
     def __init__(self, session: AsyncSession) -> None:
@@ -654,3 +683,7 @@ def _is_override_active(override: PermissionOverride, now: datetime) -> bool:
         (override.starts_at is None or override.starts_at <= now)
         and (override.expires_at is None or override.expires_at > now)
     )
+
+
+def _session_force_expires_at(session: Session) -> datetime:
+    return session.created_at + timedelta(hours=session.force_ttl_hours)

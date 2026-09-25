@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     FetchedValue,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -176,6 +177,9 @@ class Session(Base):
         DateTime(timezone=False), nullable=False, server_default=UTC_NOW
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    force_ttl_hours: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("720")
+    )
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False))
 
     account: Mapped["Account"] = relationship(back_populates="sessions")

@@ -179,5 +179,7 @@ Table sessions {
   created_at timestamp [not null]
   last_used_at timestamp [not null]
   expires_at timestamp [not null]
+  // 從 created_at 起算的強制過期時長（小時）
+  force_ttl_hours integer [not null, default: 720]
   revoked_at timestamp
 }
