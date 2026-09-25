@@ -68,7 +68,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         )
 
     transport = ASGITransport(app=api_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
         invalid_login = await client.post(
             "/auth/login",
             json={
@@ -88,11 +88,16 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
             },
         )
         assert login.status_code == 200
-        token = login.json()["access_token"]
+        assert "access_token" not in login.json()
+        token = login.cookies.get("__Host-session")
+        assert token is not None
         assert token != hash_token(token)
-        headers = {"Authorization": f"Bearer {token}"}
+        cookie_header = login.headers["set-cookie"].lower()
+        assert "httponly" in cookie_header
+        assert "secure" in cookie_header
+        assert "samesite=lax" in cookie_header
 
-        profile = await client.get("/users/me", headers=headers)
+        profile = await client.get("/users/me")
         assert profile.status_code == 200
         assert profile.json()["display_name"] == "Original"
         assert profile.json()["position_name"] == "student"
@@ -102,7 +107,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         assert "password_hash" not in profile.json()
 
         updated_profile = await client.patch(
-            "/users/me", json={"display_name": "Updated"}, headers=headers
+            "/users/me", json={"display_name": "Updated"}
         )
         assert updated_profile.status_code == 200
         assert updated_profile.json()["display_name"] == "Updated"
@@ -110,17 +115,15 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         short_password = await client.patch(
             "/users/me/password",
             json={"current_password": "old-secret", "new_password": "short"},
-            headers=headers,
         )
         assert short_password.status_code == 422
 
         changed_password = await client.patch(
             "/users/me/password",
-            json={"current_password": "old-secret", "new_password": "new-secret"},
-            headers=headers,
+            json={"current_password": "old-secret", "new_password": "new-secret-long"},
         )
         assert changed_password.status_code == 204
-        assert (await client.get("/users/me", headers=headers)).status_code == 401
+        assert (await client.get("/users/me")).status_code == 401
 
         old_password_login = await client.post(
             "/auth/login",
@@ -136,7 +139,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
             json={
                 "account": "320201",
                 "position_name": "student",
-                "password": "new-secret",
+                "password": "new-secret-long",
             },
         )
         assert new_password_login.status_code == 200

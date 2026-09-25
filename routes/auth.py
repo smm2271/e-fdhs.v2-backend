@@ -13,7 +13,7 @@ from uuid import UUID
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 _password_hasher = PasswordHasher()
+_SESSION_COOKIE_NAME = "__Host-session"
+# Keep authentication failures at the same Argon2 cost even if no account exists.
+_DUMMY_PASSWORD_HASH = _password_hasher.hash(secrets.token_urlsafe(32))
 
 
 def _duration_from_hours(variable_name: str, default_hours: int) -> timedelta:
@@ -101,9 +104,7 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
-class AccessTokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class SessionResponse(BaseModel):
     expires_at: datetime
 
 
@@ -143,19 +144,23 @@ def account_profile(principal: AuthenticatedPrincipal) -> AccountProfile:
 
 
 async def get_current_principal(
+    request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
     ],
     database_session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AuthenticatedPrincipal:
-    """Resolve an active Bearer token to its enabled account and persisted session."""
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    """Resolve an active HttpOnly session cookie (or legacy Bearer token)."""
+    token = request.cookies.get(_SESSION_COOKIE_NAME)
+    if token is None and credentials is not None and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    if token is None:
         raise _unauthorized()
 
     sessions = SessionService(database_session)
     try:
         current_session = await sessions.get_active_by_token_hash(
-            hash_token(credentials.credentials)
+            hash_token(token)
         )
         account = await AccountService(database_session).get(current_session.account_id)
         position = await PositionService(database_session).get(account.position_id)
@@ -189,20 +194,25 @@ async def get_current_account(
     return principal.account
 
 
-@router.post("/login", response_model=AccessTokenResponse)
+@router.post("/login", response_model=SessionResponse)
 async def login(
     payload: LoginRequest,
     database_session: Annotated[AsyncSession, Depends(get_session)],
-) -> AccessTokenResponse:
+) -> Response:
     positions = PositionService(database_session)
     accounts = AccountService(database_session)
+    account: Account | None = None
     try:
         position = await positions.get_by_name(payload.position_name)
         account = await accounts.get_by_account_position(payload.account, position.id)
-    except NotFoundError as error:
-        raise _unauthorized() from error
+    except NotFoundError:
+        pass
 
-    if not account.is_active or not await verify_password(account.password_hash, payload.password):
+    password_hash = (
+        account.password_hash if account is not None and account.is_active else _DUMMY_PASSWORD_HASH
+    )
+    password_valid = await verify_password(password_hash, payload.password)
+    if account is None or not account.is_active or not password_valid:
         raise _unauthorized()
 
     if await password_needs_rehash(account.password_hash):
@@ -225,7 +235,20 @@ async def login(
         expires_at=expires_at,
         force_ttl_hours=int(force_ttl.total_seconds() // 3600),
     )
-    return AccessTokenResponse(access_token=token, expires_at=expires_at)
+    response = Response(
+        content=SessionResponse(expires_at=expires_at).model_dump_json(),
+        media_type="application/json",
+    )
+    response.set_cookie(
+        key=_SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+        max_age=int(session_ttl.total_seconds()),
+    )
+    return response
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -234,7 +257,9 @@ async def logout(
     database_session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     await SessionService(database_session).revoke(principal.session.id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(key=_SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="lax")
+    return response
 
 
 @router.get("/me", response_model=AccountProfile)

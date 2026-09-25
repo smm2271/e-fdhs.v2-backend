@@ -383,6 +383,15 @@ class AccountService:
         await _commit_and_refresh(self.session, model)
         return model
 
+    async def update_password_without_commit(
+        self, account_id: UUID, *, password_hash: str
+    ) -> Account:
+        """Stage a password change for a caller-managed transaction."""
+        model = await self.get(account_id)
+        model.password_hash = password_hash
+        await self.session.flush()
+        return model
+
     async def delete(self, account_id: UUID) -> None:
         await self.get(account_id)
         role_id = await self.session.scalar(
@@ -561,15 +570,22 @@ class SessionService:
         ):
             raise NotFoundError("Active session was not found")
 
-        model.last_used_at = current_time
-        if (
+        renew = (
             model.expires_at - current_time <= renewal_window
             and model.expires_at < force_expires_at
-        ):
+        )
+        # Do not turn every authenticated request into a database write.  The
+        # timestamp is retained for auditing, but is sampled at five-minute intervals.
+        update_last_used = model.last_used_at <= current_time - timedelta(minutes=5)
+        if renew:
             model.expires_at = min(
                 current_time + renewal_ttl, force_expires_at
             )
-        await _commit_and_refresh(self.session, model)
+        if update_last_used:
+            model.last_used_at = current_time
+        if renew or update_last_used:
+            await self.session.flush()
+            await self.session.commit()
         return model
 
     async def revoke(
@@ -584,17 +600,24 @@ class SessionService:
     async def revoke_all_for_account(
         self, account_id: UUID, *, revoked_at: Optional[datetime] = None
     ) -> int:
-        await AccountService(self.session).get(account_id)
-        revoked_at = _utc_naive(revoked_at) or datetime.now(timezone.utc).replace(
-            tzinfo=None
+        count = await self.revoke_all_for_account_without_commit(
+            account_id, revoked_at=revoked_at
         )
+        await _commit(self.session)
+        return count
+
+    async def revoke_all_for_account_without_commit(
+        self, account_id: UUID, *, revoked_at: Optional[datetime] = None
+    ) -> int:
+        """Stage revocation for a caller-managed transaction."""
+        await AccountService(self.session).get(account_id)
+        revoked_at = _utc_naive(revoked_at) or datetime.now(timezone.utc).replace(tzinfo=None)
         result = await self.session.execute(
             update(Session)
             .where(Session.account_id == account_id, Session.revoked_at.is_(None))
             .values(revoked_at=revoked_at)
             .execution_options(synchronize_session=False)
         )
-        await _commit(self.session)
         return result.rowcount or 0
 
 class PermissionOverrideService:
