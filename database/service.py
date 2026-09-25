@@ -576,7 +576,10 @@ class SessionService:
         )
         # Do not turn every authenticated request into a database write.  The
         # timestamp is retained for auditing, but is sampled at five-minute intervals.
-        update_last_used = model.last_used_at <= current_time - timedelta(minutes=5)
+        update_last_used = (
+            used_at is not None
+            or model.last_used_at <= current_time - timedelta(minutes=5)
+        )
         if renew:
             model.expires_at = min(
                 current_time + renewal_ttl, force_expires_at
