@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import dotenv
 
 import pytest
 
+dotenv.load_dotenv()
 
 _DATABASE_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 _MISSING_TEST_KEYS = [key for key in _DATABASE_KEYS if not os.getenv(f"TEST_{key}")]

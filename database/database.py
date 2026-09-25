@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import dotenv
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+dotenv.load_dotenv()
 
 class DatabaseConfigurationError(RuntimeError):
     """Raised when the PostgreSQL connection environment is incomplete."""
