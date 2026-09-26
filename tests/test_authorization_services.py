@@ -12,6 +12,7 @@ from alembic.config import Config
 from sqlalchemy import inspect, text
 
 from database.database import AsyncSessionLocal, engine
+from database.model import AccountType
 from database.service import (
     AccountService,
     ConflictError,
@@ -54,6 +55,8 @@ async def test_initial_migration_creates_dbml_tables_and_keys() -> None:
         schema = await connection.run_sync(
             lambda sync_connection: {
                 "tables": set(inspect(sync_connection).get_table_names()),
+                "account_columns": inspect(sync_connection).get_columns("accounts"),
+                "account_indexes": inspect(sync_connection).get_indexes("accounts"),
                 "account_unique": inspect(sync_connection).get_unique_constraints("accounts"),
                 "account_role_pk": inspect(sync_connection).get_pk_constraint("account_roles"),
                 "account_foreign_keys": inspect(sync_connection).get_foreign_keys("accounts"),
@@ -71,9 +74,38 @@ async def test_initial_migration_creates_dbml_tables_and_keys() -> None:
         "permission_overrides",
         "sessions",
     }.issubset(schema["tables"])
-    assert any(
-        constraint["column_names"] == ["account", "position_id"]
-        for constraint in schema["account_unique"]
+    account_type_column = next(
+        column
+        for column in schema["account_columns"]
+        if column["name"] == "account_type"
+    )
+    assert account_type_column["nullable"] is False
+    assert account_type_column["type"].enums == ["student", "teacher"]
+    assert not schema["account_unique"]
+    unique_indexes = {
+        (index["name"], tuple(index["column_names"]))
+        for index in schema["account_indexes"]
+        if index["unique"]
+    }
+    assert unique_indexes == {
+        (
+            "uq_accounts_student_account_position_id",
+            ("account", "position_id"),
+        ),
+        ("uq_accounts_teacher_account", ("account",)),
+    }
+    indexes_by_name = {
+        index["name"]: index for index in schema["account_indexes"]
+    }
+    assert "student" in str(
+        indexes_by_name["uq_accounts_student_account_position_id"][
+            "dialect_options"
+        ]["postgresql_where"]
+    )
+    assert "teacher" in str(
+        indexes_by_name["uq_accounts_teacher_account"]["dialect_options"][
+            "postgresql_where"
+        ]
     )
     assert schema["account_role_pk"]["constrained_columns"] == ["account_id", "role_id"]
     assert {foreign_key["referred_table"] for foreign_key in schema["account_foreign_keys"]} == {
@@ -101,6 +133,7 @@ async def test_effective_permissions_honors_active_overrides_and_deny() -> None:
         role = await roles.create(name="monitor", permissions=0b1100)
         account = await accounts.create(
             account="320001",
+            account_type=AccountType.STUDENT,
             position_id=position.id,
             password_hash="already-hashed",
             group_id=group.id,
@@ -140,6 +173,7 @@ async def test_group_cycles_and_referenced_deletes_are_rejected() -> None:
         position = await positions.create(name="teacher")
         await accounts.create(
             account="teacher-1",
+            account_type=AccountType.TEACHER,
             position_id=position.id,
             password_hash="already-hashed",
             group_id=child.id,
@@ -163,6 +197,7 @@ async def test_unique_assignments_and_database_updated_at() -> None:
         role = await roles.create(name="reader")
         account = await accounts.create(
             account="320002",
+            account_type=AccountType.STUDENT,
             position_id=position.id,
             password_hash="already-hashed",
             group_id=group.id,
@@ -192,6 +227,7 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
         assert (await positions.get_by_name("session-test")).id == position.id
         account = await accounts.create(
             account="320003",
+            account_type=AccountType.STUDENT,
             position_id=position.id,
             password_hash="already-hashed",
             group_id=group.id,
@@ -231,3 +267,74 @@ async def test_sessions_only_resolve_while_unexpired_and_unrevoked() -> None:
             await sessions.get_active_by_token_hash(second_session.token_hash, now=now)
         with pytest.raises(ConflictError):
             await accounts.delete(account.id)
+
+
+@pytest.mark.asyncio
+async def test_account_type_specific_uniqueness_and_lookup() -> None:
+    async with AsyncSessionLocal() as session:
+        groups = GroupService(session)
+        positions = PositionService(session)
+        accounts = AccountService(session)
+
+        group = await groups.create(group_type="class", name="Class 104")
+        student = await positions.create(name="student-login")
+        monitor = await positions.create(name="monitor-login")
+        teacher = await positions.create(name="teacher-login")
+        director = await positions.create(name="director-login")
+        group_id = group.id
+        student_id = student.id
+        monitor_id = monitor.id
+        teacher_id = teacher.id
+        director_id = director.id
+
+        first_student = await accounts.create(
+            account="s399",
+            account_type=AccountType.STUDENT,
+            position_id=student_id,
+            password_hash="already-hashed",
+            group_id=group_id,
+        )
+        second_student = await accounts.create(
+            account="s399",
+            account_type=AccountType.STUDENT,
+            position_id=monitor_id,
+            password_hash="already-hashed",
+            group_id=group_id,
+        )
+        assert first_student.id != second_student.id
+        with pytest.raises(ConflictError):
+            await accounts.create(
+                account="s399",
+                account_type=AccountType.STUDENT,
+                position_id=student_id,
+                password_hash="already-hashed",
+                group_id=group_id,
+            )
+
+        first_teacher = await accounts.create(
+            account="t001",
+            account_type=AccountType.TEACHER,
+            position_id=teacher_id,
+            password_hash="already-hashed",
+            group_id=group_id,
+        )
+        first_teacher_id = first_teacher.id
+        with pytest.raises(ConflictError):
+            await accounts.create(
+                account="t001",
+                account_type=AccountType.TEACHER,
+                position_id=director_id,
+                password_hash="already-hashed",
+                group_id=group_id,
+            )
+        second_teacher = await accounts.create(
+            account="t002",
+            account_type=AccountType.TEACHER,
+            position_id=director_id,
+            password_hash="already-hashed",
+            group_id=group_id,
+        )
+        assert first_teacher_id != second_teacher.id
+        assert (await accounts.get_teacher_by_account("t001")).id == first_teacher_id
+        with pytest.raises(NotFoundError):
+            await accounts.get_by_account_position("t001", teacher_id)

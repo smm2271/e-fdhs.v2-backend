@@ -15,11 +15,11 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.database import get_session
-from database.model import Account, Session
+from database.model import Account, AccountType, Session
 from database.service import (
     AccountService,
     GroupService,
@@ -99,9 +99,16 @@ def _unauthorized() -> HTTPException:
 
 
 class LoginRequest(BaseModel):
+    account_type: AccountType
     account: str = Field(min_length=1, max_length=64)
-    position_name: str = Field(min_length=1, max_length=255)
+    position_name: str | None = Field(default=None, min_length=1, max_length=255)
     password: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_position_name(self) -> LoginRequest:
+        if self.account_type is AccountType.STUDENT and self.position_name is None:
+            raise ValueError("position_name is required for student login")
+        return self
 
 
 class SessionResponse(BaseModel):
@@ -199,12 +206,18 @@ async def login(
     payload: LoginRequest,
     database_session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    positions = PositionService(database_session)
     accounts = AccountService(database_session)
     account: Account | None = None
     try:
-        position = await positions.get_by_name(payload.position_name)
-        account = await accounts.get_by_account_position(payload.account, position.id)
+        if payload.account_type is AccountType.STUDENT:
+            position = await PositionService(database_session).get_by_name(
+                payload.position_name
+            )
+            account = await accounts.get_by_account_position(
+                payload.account, position.id
+            )
+        else:
+            account = await accounts.get_teacher_by_account(payload.account)
     except NotFoundError:
         pass
 

@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
 from database.database import AsyncSessionLocal, engine, get_session
-from database.model import Session
+from database.model import AccountType, Session
 from database.service import AccountService, GroupService, PositionService, SessionService
 from main import create_app
 from routes.auth import hash_password, hash_token
@@ -61,6 +61,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         position = await PositionService(session).create(name="student")
         account = await AccountService(session).create(
             account="320201",
+            account_type=AccountType.STUDENT,
             position_id=position.id,
             password_hash=await hash_password("old-secret"),
             group_id=group.id,
@@ -72,6 +73,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         invalid_login = await client.post(
             "/auth/login",
             json={
+                "account_type": "student",
                 "account": "320201",
                 "position_name": "student",
                 "password": "incorrect",
@@ -82,6 +84,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         login = await client.post(
             "/auth/login",
             json={
+                "account_type": "student",
                 "account": "320201",
                 "position_name": "student",
                 "password": "old-secret",
@@ -128,6 +131,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         old_password_login = await client.post(
             "/auth/login",
             json={
+                "account_type": "student",
                 "account": "320201",
                 "position_name": "student",
                 "password": "old-secret",
@@ -137,6 +141,7 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         new_password_login = await client.post(
             "/auth/login",
             json={
+                "account_type": "student",
                 "account": "320201",
                 "position_name": "student",
                 "password": "new-secret-long",
@@ -151,3 +156,85 @@ async def test_login_profile_update_and_password_change_revoke_all_sessions(api_
         assert persisted_session is not None
         assert persisted_session.token_hash != token
         assert persisted_session.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_student_and_teacher_login_identity_rules(api_app) -> None:
+    async with AsyncSessionLocal() as session:
+        group = await GroupService(session).create(
+            group_type="department", name="Academic Affairs"
+        )
+        student_position = await PositionService(session).create(
+            name="general-student"
+        )
+        wrong_position = await PositionService(session).create(name="class-monitor")
+        teacher_position = await PositionService(session).create(name="teacher")
+        await AccountService(session).create(
+            account="s399",
+            account_type=AccountType.STUDENT,
+            position_id=student_position.id,
+            password_hash=await hash_password("student-secret"),
+            group_id=group.id,
+        )
+        await AccountService(session).create(
+            account="t001",
+            account_type=AccountType.TEACHER,
+            position_id=teacher_position.id,
+            password_hash=await hash_password("teacher-secret"),
+            group_id=group.id,
+        )
+
+    transport = ASGITransport(app=api_app)
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
+        student_login = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "student",
+                "account": "s399",
+                "position_name": student_position.name,
+                "password": "student-secret",
+            },
+        )
+        assert student_login.status_code == 200
+
+        missing_position = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "student",
+                "account": "s399",
+                "password": "student-secret",
+            },
+        )
+        assert missing_position.status_code == 422
+
+        wrong_student_position = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "student",
+                "account": "s399",
+                "position_name": wrong_position.name,
+                "password": "student-secret",
+            },
+        )
+        assert wrong_student_position.status_code == 401
+
+        teacher_login = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "teacher",
+                "account": "t001",
+                "password": "teacher-secret",
+            },
+        )
+        assert teacher_login.status_code == 200
+
+        teacher_as_student = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "student",
+                "account": "t001",
+                "position_name": teacher_position.name,
+                "password": "teacher-secret",
+            },
+        )
+        assert teacher_as_student.status_code == 401

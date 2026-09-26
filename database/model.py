@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
@@ -10,8 +11,10 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Enum as SAEnum,
     FetchedValue,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -24,6 +27,11 @@ from .database import Base
 
 
 UTC_NOW = text("timezone('utc', now())")
+
+
+class AccountType(str, enum.Enum):
+    STUDENT = "student"
+    TEACHER = "teacher"
 
 
 class Group(Base):
@@ -72,11 +80,31 @@ class Position(Base):
 class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
-        UniqueConstraint("account", "position_id", name="uq_accounts_account_position_id"),
+        Index(
+            "uq_accounts_student_account_position_id",
+            "account",
+            "position_id",
+            unique=True,
+            postgresql_where=text("account_type = 'student'"),
+        ),
+        Index(
+            "uq_accounts_teacher_account",
+            "account",
+            unique=True,
+            postgresql_where=text("account_type = 'teacher'"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     account: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_type: Mapped[AccountType] = mapped_column(
+        SAEnum(
+            AccountType,
+            name="account_type",
+            values_callable=lambda enum_class: [member.value for member in enum_class],
+        ),
+        nullable=False,
+    )
     position_id: Mapped[UUID] = mapped_column(ForeignKey("positions.id"), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), nullable=False)

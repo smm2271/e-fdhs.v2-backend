@@ -33,7 +33,7 @@ Table groups {
 // ============================================================
 // Positions
 //
-// 表示登入時選擇的「職務」。
+// 表示 Account 的權限與職務資料；學生登入時也用來區分登入 Identity。
 // 例如：一般學生、班代表、資訊股長、教師。
 //
 // permissions 為此職務提供的基礎權限。
@@ -57,8 +57,10 @@ Table positions {
 //
 // 一筆 Account 代表一個可登入的 Identity。
 //
-// 新版維持「帳號 + 職務 + 密碼」登入。
-// 因此 (account, position_id) 共同構成登入識別。
+// student 使用「帳號 + 職務 + 密碼」登入，
+// (account, position_id) 共同構成登入識別。
+// teacher 使用「帳號 + 密碼」登入，account 本身構成登入識別；
+// position 仍保留作為權限與職務資料，但不參與 teacher 的登入識別。
 //
 // 例如：
 // (320, 一般學生)
@@ -75,7 +77,10 @@ Table accounts {
   // 登入時輸入的帳號，例如 ciallo、s320......
   account varchar(64) [not null]
 
-  // 登入時選擇的職務
+  // 帳號類型決定登入識別與唯一性規則
+  account_type account_type [not null]
+
+  // Account 的權限與職務；student 登入時必須選擇
   position_id uuid [not null, ref: > positions.id]
 
   password_hash varchar(255) [not null]
@@ -93,10 +98,16 @@ Table accounts {
   updated_at timestamp [not null]
 
   indexes {
-    // 同一帳號可有不同職務，
-    // 但相同「帳號 + 職務」只能存在一次
-    (account, position_id) [unique]
+    // PostgreSQL partial unique index，WHERE account_type = 'student'
+    (account, position_id) [unique, name: 'uq_accounts_student_account_position_id', note: 'WHERE account_type = student']
+    // PostgreSQL partial unique index，WHERE account_type = 'teacher'
+    account [unique, name: 'uq_accounts_teacher_account', note: 'WHERE account_type = teacher']
   }
+}
+
+Enum account_type {
+  student
+  teacher
 }
 
 

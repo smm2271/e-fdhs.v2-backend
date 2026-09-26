@@ -11,7 +11,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .model import Account, AccountRole, Group, PermissionOverride, Position, Role, Session
+from .model import (
+    Account,
+    AccountRole,
+    AccountType,
+    Group,
+    PermissionOverride,
+    Position,
+    Role,
+    Session,
+)
 
 
 class ServiceError(Exception):
@@ -296,6 +305,7 @@ class AccountService:
         self,
         *,
         account: str,
+        account_type: AccountType,
         position_id: UUID,
         password_hash: str,
         group_id: UUID,
@@ -307,6 +317,7 @@ class AccountService:
         model = Account(
             id=uuid4(),
             account=account,
+            account_type=account_type,
             position_id=position_id,
             password_hash=password_hash,
             group_id=group_id,
@@ -328,13 +339,26 @@ class AccountService:
     ) -> Account:
         model = await self.session.scalar(
             select(Account).where(
-                Account.account == account, Account.position_id == position_id
+                Account.account == account,
+                Account.account_type == AccountType.STUDENT,
+                Account.position_id == position_id,
             )
         )
         if model is None:
             raise NotFoundError(
                 f"Account '{account}' with position {position_id} was not found"
             )
+        return model
+
+    async def get_teacher_by_account(self, account: str) -> Account:
+        model = await self.session.scalar(
+            select(Account).where(
+                Account.account == account,
+                Account.account_type == AccountType.TEACHER,
+            )
+        )
+        if model is None:
+            raise NotFoundError(f"Teacher account '{account}' was not found")
         return model
 
     async def list(
@@ -359,6 +383,7 @@ class AccountService:
         account_id: UUID,
         *,
         account: str | object = _UNSET,
+        account_type: AccountType | object = _UNSET,
         position_id: UUID | object = _UNSET,
         password_hash: str | object = _UNSET,
         group_id: UUID | object = _UNSET,
@@ -374,6 +399,8 @@ class AccountService:
             model.group_id = group_id
         if account is not _UNSET:
             model.account = account
+        if account_type is not _UNSET:
+            model.account_type = account_type
         if password_hash is not _UNSET:
             model.password_hash = password_hash
         if display_name is not _UNSET:
