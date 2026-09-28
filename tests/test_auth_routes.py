@@ -238,3 +238,13 @@ async def test_student_and_teacher_login_identity_rules(api_app) -> None:
             },
         )
         assert teacher_as_student.status_code == 401
+
+        student_as_teacher = await client.post(
+            "/auth/login",
+            json={
+                "account_type": "teacher",
+                "account": "s399",
+                "password": "student-secret",
+            },
+        )
+        assert student_as_teacher.status_code == 401

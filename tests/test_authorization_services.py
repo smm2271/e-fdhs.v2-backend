@@ -338,3 +338,5 @@ async def test_account_type_specific_uniqueness_and_lookup() -> None:
         assert (await accounts.get_teacher_by_account("t001")).id == first_teacher_id
         with pytest.raises(NotFoundError):
             await accounts.get_by_account_position("t001", teacher_id)
+        with pytest.raises(NotFoundError):
+            await accounts.get_teacher_by_account("s399")
