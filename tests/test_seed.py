@@ -32,7 +32,8 @@ async def empty_database() -> None:
     async with engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE sessions, permission_overrides, account_roles, accounts, roles, "
+                "TRUNCATE replies, broadcast_confirmations, broadcast_targets, broadcasts, "
+                "sessions, permission_overrides, account_roles, accounts, roles, "
                 "positions, groups RESTART IDENTITY"
             )
         )
@@ -97,7 +98,8 @@ async def test_dev_account_seed_is_idempotent_and_uses_argon2(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_dev_account_seed_requires_password_before_writing() -> None:
+async def test_dev_account_seed_requires_password_before_writing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SEED_DEV_PASSWORD", raising=False)
     with pytest.raises(ValueError, match="SEED_DEV_PASSWORD"):
         await seed_database(dev_account=True)
 

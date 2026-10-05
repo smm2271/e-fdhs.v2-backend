@@ -42,7 +42,8 @@ async def empty_database() -> None:
     async with engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE sessions, permission_overrides, account_roles, accounts, roles, "
+                "TRUNCATE replies, broadcast_confirmations, broadcast_targets, broadcasts, "
+                "sessions, permission_overrides, account_roles, accounts, roles, "
                 "positions, groups RESTART IDENTITY"
             )
         )
