@@ -211,3 +211,76 @@ class Session(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False))
 
     account: Mapped["Account"] = relationship(back_populates="sessions")
+
+
+class Broadcast(Base):
+    __tablename__ = "broadcasts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    author_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=UTC_NOW
+    )
+    # The service layer supplies the deadline for the effective confirmation cycle.
+    ack_deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+    author: Mapped["Account"] = relationship()
+    targets: Mapped[list["BroadcastTarget"]] = relationship(
+        back_populates="broadcast", passive_deletes=True
+    )
+    target_groups: Mapped[list["Group"]] = relationship(
+        secondary="broadcast_targets", viewonly=True
+    )
+    confirmations: Mapped[list["BroadcastConfirmation"]] = relationship(
+        back_populates="broadcast", passive_deletes=True
+    )
+    replies: Mapped[list["Reply"]] = relationship(
+        back_populates="broadcast", passive_deletes=True
+    )
+
+
+class BroadcastTarget(Base):
+    __tablename__ = "broadcast_targets"
+
+    broadcast_id: Mapped[UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
+    group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), primary_key=True)
+
+    broadcast: Mapped["Broadcast"] = relationship(back_populates="targets")
+    group: Mapped["Group"] = relationship()
+
+
+class BroadcastConfirmation(Base):
+    __tablename__ = "broadcast_confirmations"
+
+    broadcast_id: Mapped[UUID] = mapped_column(ForeignKey("broadcasts.id"), primary_key=True)
+    group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), primary_key=True)
+    confirmed_by_account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id"), nullable=False
+    )
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=UTC_NOW
+    )
+
+    # Membership in this broadcast's targets is validated by the service layer.
+    broadcast: Mapped["Broadcast"] = relationship(back_populates="confirmations")
+    group: Mapped["Group"] = relationship()
+    confirmed_by_account: Mapped["Account"] = relationship()
+
+
+class Reply(Base):
+    __tablename__ = "replies"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    broadcast_id: Mapped[UUID] = mapped_column(ForeignKey("broadcasts.id"), nullable=False)
+    author_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    ref_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("replies.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, server_default=UTC_NOW
+    )
+
+    broadcast: Mapped["Broadcast"] = relationship(back_populates="replies")
+    author: Mapped["Account"] = relationship()
+    # The service layer ensures that the referenced reply belongs to this broadcast.
+    referenced_reply: Mapped[Optional["Reply"]] = relationship(remote_side="Reply.id")

@@ -194,3 +194,46 @@ Table sessions {
   force_ttl_hours integer [not null, default: 720]
   revoked_at timestamp
 }
+
+
+// Broadcast publishing permissions are resolved through Position / Role / PermissionOverride.
+Table broadcasts {
+  id uuid [pk]
+  author_id uuid [not null, ref: > accounts.id]
+  content text [not null]
+  created_at timestamp [not null, default: `timezone('utc', now())`]
+  // Supplied by the service layer; no calendar calculation in the model.
+  ack_deadline_at timestamp [not null]
+}
+
+Table broadcast_targets {
+  broadcast_id uuid [not null, ref: > broadcasts.id]
+  group_id uuid [not null, ref: > groups.id]
+
+  indexes {
+    (broadcast_id, group_id) [pk]
+  }
+}
+
+// Confirmation responsibility belongs to Broadcast x Group; the account is audit data.
+// Target membership is a future service-layer invariant.
+Table broadcast_confirmations {
+  broadcast_id uuid [not null, ref: > broadcasts.id]
+  group_id uuid [not null, ref: > groups.id]
+  confirmed_by_account_id uuid [not null, ref: > accounts.id]
+  confirmed_at timestamp [not null, default: `timezone('utc', now())`]
+
+  indexes {
+    (broadcast_id, group_id) [pk]
+  }
+}
+
+Table replies {
+  id uuid [pk]
+  broadcast_id uuid [not null, ref: > broadcasts.id]
+  author_id uuid [not null, ref: > accounts.id]
+  content text [not null]
+  // NULL means a direct reply; same-broadcast references are a future service invariant.
+  ref_id uuid [ref: > replies.id]
+  created_at timestamp [not null, default: `timezone('utc', now())`]
+}
