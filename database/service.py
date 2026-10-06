@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Final, Optional
+from typing import Callable, Final, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,12 +15,18 @@ from .model import (
     Account,
     AccountRole,
     AccountType,
+    Broadcast,
+    BroadcastConfirmation,
+    BroadcastTarget,
     Group,
     PermissionOverride,
     Position,
     Role,
+    Reply,
     Session,
 )
+from .broadcast_cycle import confirmation_deadline, confirmation_state, ConfirmationState
+from .permissions import Permission
 
 
 class ServiceError(Exception):
@@ -37,6 +43,10 @@ class ConflictError(ServiceError):
 
 class ValidationError(ServiceError):
     """Raised when supplied data is structurally invalid."""
+
+
+class AuthorizationError(ServiceError):
+    """Raised when an account cannot access a domain operation or scope."""
 
 
 _UNSET: Final = object()
@@ -468,6 +478,8 @@ class AccountService:
                 selectinload(Account.role_assignments).selectinload(AccountRole.role),
                 selectinload(Account.permission_overrides),
             )
+            # Re-read permissions after role/override changes in this session.
+            .execution_options(populate_existing=True)
         )
         if model is None:
             raise NotFoundError(f"Account {account_id} was not found")
@@ -740,3 +752,199 @@ def _is_override_active(override: PermissionOverride, now: datetime) -> bool:
 
 def _session_force_expires_at(session: Session) -> datetime:
     return session.created_at + timedelta(hours=session.force_ttl_hours)
+
+
+class _BroadcastScopeService:
+    def __init__(
+        self, session: AsyncSession, *, clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.session = session
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _now(self) -> datetime:
+        return _utc_naive(self.clock())
+
+    async def _actor(self, account_id: UUID) -> Account:
+        account = await self.session.scalar(
+            select(Account).where(Account.id == account_id).execution_options(populate_existing=True)
+        )
+        if account is None:
+            raise NotFoundError(f"Account {account_id} was not found")
+        if not account.is_active:
+            raise AuthorizationError("Inactive accounts cannot access broadcasts")
+        return account
+
+    @staticmethod
+    def _read_group(account: Account, group_id: UUID) -> None:
+        if account.account_type == AccountType.TEACHER:
+            return
+        if account.account_type != AccountType.STUDENT or account.group_id != group_id:
+            raise AuthorizationError("Cannot access another group's broadcast thread")
+
+    async def _broadcast(self, broadcast_id: UUID) -> Broadcast:
+        broadcast = await self.session.get(Broadcast, broadcast_id)
+        if broadcast is None:
+            raise NotFoundError(f"Broadcast {broadcast_id} was not found")
+        return broadcast
+
+    async def _target(self, broadcast_id: UUID, group_id: UUID) -> BroadcastTarget:
+        target = await self.session.get(BroadcastTarget, (broadcast_id, group_id))
+        if target is None:
+            raise NotFoundError("Broadcast target was not found")
+        return target
+
+    async def _require_permission(self, account: Account, permission: Permission) -> None:
+        permissions = await AccountService(self.session).effective_permissions(
+            account.id, now=self._now()
+        )
+        if not permissions & permission:
+            raise AuthorizationError(f"Missing permission: {permission.name}")
+
+
+class BroadcastService(_BroadcastScopeService):
+    """Immutable broadcasts. Mutations follow the existing service-owned commit pattern."""
+
+    async def create(
+        self, *, account_id: UUID, content: str, target_group_ids: list[UUID],
+    ) -> Broadcast:
+        actor = await self._actor(account_id)
+        if actor.account_type != AccountType.TEACHER:
+            raise AuthorizationError("Only teachers can create broadcasts")
+        targets = list(dict.fromkeys(target_group_ids))
+        if not targets:
+            raise ValidationError("A broadcast requires at least one target group")
+        groups = list(await self.session.scalars(select(Group).where(Group.id.in_(targets))))
+        if len(groups) != len(targets):
+            raise NotFoundError("One or more target groups were not found")
+        if any(group.type != "class" for group in groups):
+            raise ValidationError("Broadcast targets must be class groups")
+        created_at = self._now()
+        broadcast = Broadcast(
+            id=uuid4(), author_id=actor.id, content=content, created_at=created_at,
+            ack_deadline_at=confirmation_deadline(created_at),
+            targets=[BroadcastTarget(group_id=group_id) for group_id in targets],
+        )
+        self.session.add(broadcast)
+        await _commit_and_refresh(self.session, broadcast)
+        return broadcast
+
+    async def get(self, broadcast_id: UUID, *, account_id: UUID) -> Broadcast:
+        actor = await self._actor(account_id)
+        if actor.account_type == AccountType.STUDENT:
+            await self._target(broadcast_id, actor.group_id)
+        elif actor.account_type != AccountType.TEACHER:
+            raise AuthorizationError("Cannot read broadcasts")
+        return await self._broadcast(broadcast_id)
+
+    async def list(
+        self, *, account_id: UUID, group_id: UUID | None = None,
+        limit: int = 100, offset: int = 0,
+    ) -> list[Broadcast]:
+        _validate_page(limit, offset)
+        actor = await self._actor(account_id)
+        if group_id is not None:
+            self._read_group(actor, group_id)
+        if actor.account_type == AccountType.STUDENT:
+            group_id = actor.group_id
+        statement = select(Broadcast)
+        if group_id is not None:
+            statement = statement.join(BroadcastTarget).where(BroadcastTarget.group_id == group_id)
+        result = await self.session.scalars(
+            statement.order_by(Broadcast.created_at.desc(), Broadcast.id).limit(limit).offset(offset)
+        )
+        return list(result)
+
+
+class BroadcastConfirmationService(_BroadcastScopeService):
+    async def confirm(
+        self, broadcast_id: UUID, group_id: UUID, *, account_id: UUID,
+    ) -> BroadcastConfirmation:
+        actor = await self._actor(account_id)
+        if actor.account_type != AccountType.STUDENT:
+            raise AuthorizationError("Only target-group students can confirm broadcasts")
+        self._read_group(actor, group_id)
+        await self._target(broadcast_id, group_id)
+        await self._require_permission(actor, Permission.CONFIRM_BROADCAST)
+        # Always insert: the composite primary key arbitrates duplicate/concurrent
+        # requests. An explicit INSERT also avoids ORM identity-map conflicts when
+        # a caller already loaded the first confirmation in this session.
+        try:
+            confirmation = await self.session.scalar(
+                insert(BroadcastConfirmation).values(
+                    broadcast_id=broadcast_id, group_id=group_id,
+                    confirmed_by_account_id=actor.id, confirmed_at=self._now(),
+                ).returning(BroadcastConfirmation)
+            )
+        except IntegrityError as error:
+            await self.session.rollback()
+            raise ConflictError("Operation conflicts with existing database data") from error
+        await _commit_and_refresh(self.session, confirmation)
+        return confirmation
+
+    async def get(
+        self, broadcast_id: UUID, group_id: UUID, *, account_id: UUID,
+    ) -> BroadcastConfirmation | None:
+        actor = await self._actor(account_id)
+        self._read_group(actor, group_id)
+        await self._target(broadcast_id, group_id)
+        return await self.session.get(BroadcastConfirmation, (broadcast_id, group_id))
+
+    async def status(
+        self, broadcast_id: UUID, group_id: UUID, *, account_id: UUID,
+    ) -> ConfirmationState:
+        confirmation = await self.get(broadcast_id, group_id, account_id=account_id)
+        broadcast = await self._broadcast(broadcast_id)
+        return confirmation_state(
+            broadcast.ack_deadline_at,
+            confirmed_at=confirmation.confirmed_at if confirmation is not None else None,
+            now=self._now(),
+        )
+
+
+class ReplyService(_BroadcastScopeService):
+    async def create(
+        self, broadcast_id: UUID, group_id: UUID, *, account_id: UUID,
+        content: str, ref_id: UUID | None = None,
+    ) -> Reply:
+        actor = await self._actor(account_id)
+        await self._target(broadcast_id, group_id)
+        broadcast = await self._broadcast(broadcast_id)
+        if actor.id != broadcast.author_id:
+            self._read_group(actor, group_id)
+            if actor.account_type != AccountType.STUDENT:
+                raise AuthorizationError("Only the broadcast author or permitted target students can reply")
+            await self._require_permission(actor, Permission.REPLY_BROADCAST)
+        if ref_id is not None:
+            parent = await self.session.get(Reply, ref_id)
+            if parent is None:
+                raise NotFoundError("Parent reply was not found")
+            if (parent.broadcast_id, parent.group_id) != (broadcast_id, group_id):
+                raise ValidationError("Parent reply must belong to the same broadcast and target group")
+        reply = Reply(
+            id=uuid4(), broadcast_id=broadcast_id, group_id=group_id,
+            author_id=actor.id, content=content, ref_id=ref_id, created_at=self._now(),
+        )
+        self.session.add(reply)
+        await _commit_and_refresh(self.session, reply)
+        return reply
+
+    async def get(self, reply_id: UUID, *, account_id: UUID) -> Reply:
+        actor = await self._actor(account_id)
+        reply = await self.session.get(Reply, reply_id)
+        if reply is None:
+            raise NotFoundError("Reply was not found")
+        self._read_group(actor, reply.group_id)
+        return reply
+
+    async def list_thread(
+        self, broadcast_id: UUID, group_id: UUID, *, account_id: UUID,
+    ) -> list[Reply]:
+        """Return the complete target tree as ordered nodes linked by ref_id."""
+        actor = await self._actor(account_id)
+        self._read_group(actor, group_id)
+        await self._target(broadcast_id, group_id)
+        result = await self.session.scalars(
+            select(Reply).where(Reply.broadcast_id == broadcast_id, Reply.group_id == group_id)
+            .order_by(Reply.created_at, Reply.id)
+        )
+        return list(result)
