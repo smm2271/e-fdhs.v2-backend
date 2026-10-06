@@ -14,6 +14,7 @@ from sqlalchemy import (
     Enum as SAEnum,
     FetchedValue,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -236,7 +237,7 @@ class Broadcast(Base):
         back_populates="broadcast", passive_deletes=True
     )
     replies: Mapped[list["Reply"]] = relationship(
-        back_populates="broadcast", passive_deletes=True
+        primaryjoin="Broadcast.id == foreign(Reply.broadcast_id)", viewonly=True
     )
 
 
@@ -248,6 +249,9 @@ class BroadcastTarget(Base):
 
     broadcast: Mapped["Broadcast"] = relationship(back_populates="targets")
     group: Mapped["Group"] = relationship()
+    replies: Mapped[list["Reply"]] = relationship(
+        back_populates="target", passive_deletes=True
+    )
 
 
 class BroadcastConfirmation(Base):
@@ -270,9 +274,17 @@ class BroadcastConfirmation(Base):
 
 class Reply(Base):
     __tablename__ = "replies"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["broadcast_id", "group_id"],
+            ["broadcast_targets.broadcast_id", "broadcast_targets.group_id"],
+            name="fk_replies_broadcast_group_target",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    broadcast_id: Mapped[UUID] = mapped_column(ForeignKey("broadcasts.id"), nullable=False)
+    broadcast_id: Mapped[UUID] = mapped_column(nullable=False)
+    group_id: Mapped[UUID] = mapped_column(nullable=False)
     author_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     ref_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("replies.id"), nullable=True)
@@ -280,7 +292,10 @@ class Reply(Base):
         DateTime(timezone=False), nullable=False, server_default=UTC_NOW
     )
 
-    broadcast: Mapped["Broadcast"] = relationship(back_populates="replies")
+    target: Mapped["BroadcastTarget"] = relationship(back_populates="replies")
+    broadcast: Mapped["Broadcast"] = relationship(
+        primaryjoin="foreign(Reply.broadcast_id) == Broadcast.id", viewonly=True
+    )
     author: Mapped["Account"] = relationship()
-    # The service layer ensures that the referenced reply belongs to this broadcast.
+    # The service layer ensures that the parent belongs to this target thread.
     referenced_reply: Mapped[Optional["Reply"]] = relationship(remote_side="Reply.id")

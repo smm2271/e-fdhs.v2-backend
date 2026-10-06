@@ -196,7 +196,7 @@ Table sessions {
 }
 
 
-// Broadcast publishing permissions are resolved through Position / Role / PermissionOverride.
+// Only teacher accounts can publish broadcasts; no publish permission bit.
 Table broadcasts {
   id uuid [pk]
   author_id uuid [not null, ref: > accounts.id]
@@ -216,7 +216,7 @@ Table broadcast_targets {
 }
 
 // Confirmation responsibility belongs to Broadcast x Group; the account is audit data.
-// Target membership is a future service-layer invariant.
+// Target membership is validated by the service layer.
 Table broadcast_confirmations {
   broadcast_id uuid [not null, ref: > broadcasts.id]
   group_id uuid [not null, ref: > groups.id]
@@ -230,10 +230,13 @@ Table broadcast_confirmations {
 
 Table replies {
   id uuid [pk]
-  broadcast_id uuid [not null, ref: > broadcasts.id]
+  broadcast_id uuid [not null]
+  group_id uuid [not null]
   author_id uuid [not null, ref: > accounts.id]
   content text [not null]
-  // NULL means a direct reply; same-broadcast references are a future service invariant.
+  // NULL means a root reply; the service validates same-broadcast and same-group parents.
   ref_id uuid [ref: > replies.id]
   created_at timestamp [not null, default: `timezone('utc', now())`]
 }
+
+Ref: replies.(broadcast_id, group_id) > broadcast_targets.(broadcast_id, group_id)

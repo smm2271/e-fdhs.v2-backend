@@ -16,7 +16,7 @@ TABLE_COLUMNS = {
     "broadcast_confirmations": (
         "broadcast_id", "group_id", "confirmed_by_account_id", "confirmed_at"
     ),
-    "replies": ("id", "broadcast_id", "author_id", "content", "ref_id", "created_at"),
+    "replies": ("id", "broadcast_id", "group_id", "author_id", "content", "ref_id", "created_at"),
 }
 
 
@@ -53,5 +53,5 @@ def test_broadcast_metadata_and_relationships() -> None:
 def test_broadcast_migration_is_the_only_head_and_follows_previous_revision() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["20261005_0005"]
-    assert scripts.get_revision("head").down_revision == "20260927_0004"
+    assert scripts.get_heads() == ["20261006_0006"]
+    assert scripts.get_revision("head").down_revision == "20261005_0005"

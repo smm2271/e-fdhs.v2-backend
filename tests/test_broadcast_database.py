@@ -76,7 +76,7 @@ def assert_schema_matches_models(connection) -> None:
     for name in TABLES:
         model = Base.metadata.tables[name]
         columns = inspector.get_columns(name)
-        assert [column["name"] for column in columns] == list(model.columns.keys())
+        assert {column["name"] for column in columns} == set(model.columns.keys())
         for column in columns:
             expected = model.c[column["name"]]
             assert column["nullable"] == expected.nullable
@@ -114,13 +114,16 @@ async def test_migrated_broadcast_schema_matches_model_metadata() -> None:
 async def test_broadcast_migration_downgrade_and_upgrade_round_trip() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     migration = ScriptDirectory.from_config(config).get_revision("20261005_0005").module
+    target_migration = ScriptDirectory.from_config(config).get_revision("20261006_0006").module
 
     def round_trip(connection) -> None:
         existing = set(inspect(connection).get_table_names())
         with Operations.context(MigrationContext.configure(connection)):
+            target_migration.downgrade()
             migration.downgrade()
             assert set(inspect(connection).get_table_names()) == existing - set(TABLES)
             migration.upgrade()
+            target_migration.upgrade()
         assert set(inspect(connection).get_table_names()) == existing
         assert_schema_matches_models(connection)
 
@@ -175,10 +178,10 @@ async def test_confirmation_uniqueness_is_per_group_not_account(broadcast_data) 
 
 @pytest.mark.asyncio
 async def test_reply_can_be_direct_or_reference_another_reply(broadcast_data) -> None:
-    session, broadcast, _, _, author, _ = broadcast_data
-    direct = Reply(broadcast=broadcast, author=author, content="Direct reply")
+    session, broadcast, first, _, author, _ = broadcast_data
+    direct = Reply(target=broadcast.targets[0], author=author, content="Direct reply")
     nested = Reply(
-        broadcast=broadcast, author=author, content="Nested reply", referenced_reply=direct
+        target=broadcast.targets[0], author=author, content="Nested reply", referenced_reply=direct
     )
     session.add_all([direct, nested])
     await session.commit()
@@ -198,7 +201,7 @@ async def test_reply_can_be_direct_or_reference_another_reply(broadcast_data) ->
     with pytest.raises(IntegrityError):
         async with session.begin_nested():
             await session.execute(insert(Reply).values(
-                broadcast_id=direct.broadcast_id, author_id=direct.author_id,
+                broadcast_id=direct.broadcast_id, group_id=direct.group_id, author_id=direct.author_id,
                 content="Missing reference", ref_id=uuid4(),
             ))
 
@@ -211,3 +214,82 @@ async def test_broadcast_deadline_is_required(broadcast_data) -> None:
             await session.execute(insert(Broadcast).values(
                 author_id=author.id, content="No deadline", ack_deadline_at=None,
             ))
+
+
+@pytest.mark.asyncio
+async def test_reply_composite_fk_rejects_non_target_group(broadcast_data) -> None:
+    session, broadcast, first, _, author, _ = broadcast_data
+    non_target = Group(type="class", name="No target")
+    session.add(non_target)
+    await session.commit()
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await session.execute(insert(Reply).values(
+                broadcast_id=broadcast.id, group_id=non_target.id,
+                author_id=author.id, content="Wrong target",
+            ))
+    # A group that is targeted elsewhere still cannot bypass the composite key.
+    other = Broadcast(author=author, content="Other", ack_deadline_at=DEADLINE,
+                      targets=[BroadcastTarget(group=non_target)])
+    session.add(other)
+    await session.commit()
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await session.execute(insert(Reply).values(
+                broadcast_id=other.id, group_id=first.id,
+                author_id=author.id, content="Wrong broadcast",
+            ))
+
+
+@pytest.mark.asyncio
+async def test_target_migration_backfills_unique_legacy_target(broadcast_data) -> None:
+    _, broadcast, first, _, author, _ = broadcast_data
+    broadcast_id, group_id, author_id = broadcast.id, first.id, author.id
+    migration = ScriptDirectory.from_config(Config(
+        str(Path(__file__).parents[1] / "alembic.ini")
+    )).get_revision("20261006_0006").module
+
+    def round_trip(connection):
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+            connection.execute(text("DELETE FROM broadcast_targets WHERE broadcast_id = :id AND group_id <> :group"),
+                               {"id": broadcast_id, "group": group_id})
+            reply_id = uuid4()
+            connection.execute(text("INSERT INTO replies (id, broadcast_id, author_id, content) VALUES (:id, :broadcast, :author, 'Legacy')"),
+                               {"id": reply_id, "broadcast": broadcast_id, "author": author_id})
+            migration.upgrade()
+            assert connection.scalar(text("SELECT group_id FROM replies WHERE id = :id"), {"id": reply_id}) == group_id
+            assert_schema_matches_models(connection)
+            migration.downgrade()
+            assert connection.scalar(text("SELECT content FROM replies WHERE id = :id"), {"id": reply_id}) == "Legacy"
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        try:
+            await connection.run_sync(round_trip)
+        finally:
+            await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_target_migration_rejects_ambiguous_legacy_replies(broadcast_data) -> None:
+    _, broadcast, _, _, author, _ = broadcast_data
+    broadcast_id, author_id = broadcast.id, author.id
+    migration = ScriptDirectory.from_config(Config(
+        str(Path(__file__).parents[1] / "alembic.ini")
+    )).get_revision("20261006_0006").module
+
+    def ambiguous(connection):
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+            connection.execute(text("INSERT INTO replies (id, broadcast_id, author_id, content) VALUES (:id, :broadcast, :author, 'Ambiguous')"),
+                               {"id": uuid4(), "broadcast": broadcast_id, "author": author_id})
+            migration.upgrade()
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        try:
+            with pytest.raises(Exception, match="Cannot scope legacy replies"):
+                await connection.run_sync(ambiguous)
+        finally:
+            await transaction.rollback()
