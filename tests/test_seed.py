@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text
 from database.database import AsyncSessionLocal, engine
 from database.model import Account, AccountType, Group, Position
 from database.seed import seed_database
+from database.seed import POSITION_PERMISSIONS
 from routes.auth import verify_password
 
 
@@ -51,7 +52,8 @@ async def test_default_seed_creates_only_master_data_and_preserves_existing_valu
         assert group is not None
         assert (group.type, group.parent_id, group.propagate_confirmation) == ("class", None, True)
         assert {position.name for position in positions} == {"一般學生", "班代表", "資訊股長", "教師"}
-        assert all(position.permissions == 0 and position.description is None for position in positions)
+        assert all(position.permissions == POSITION_PERMISSIONS[position.name]
+                   and position.description is None for position in positions)
         assert await session.scalar(select(func.count()).select_from(Account)) == 0
 
         student_position = next(position for position in positions if position.name == "一般學生")

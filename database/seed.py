@@ -13,12 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.database import AsyncSessionLocal
 from database.model import Account, AccountType, Group, Position
+from database.permissions import Permission
 from routes.auth import hash_password
 
 
 CLASS_GROUP = ("class", "320")
 DEV_TEACHER_GROUP = ("department", "開發教師")
 POSITION_NAMES = ("一般學生", "班代表", "資訊股長", "教師")
+POSITION_PERMISSIONS = {
+    "一般學生": 0,
+    "班代表": int(Permission.CONFIRM_BROADCAST | Permission.REPLY_BROADCAST),
+    "資訊股長": int(Permission.CONFIRM_BROADCAST | Permission.REPLY_BROADCAST),
+    "教師": 0,
+}
 
 
 async def _ensure_group(
@@ -54,7 +61,7 @@ async def _ensure_position(
         results["positions_skipped"] += 1
         return position
 
-    position = Position(name=name, permissions=0, description=None)
+    position = Position(name=name, permissions=POSITION_PERMISSIONS[name], description=None)
     session.add(position)
     await session.flush()
     results["positions_created"] += 1
