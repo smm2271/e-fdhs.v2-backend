@@ -216,7 +216,7 @@ Table broadcast_targets {
 }
 
 // Confirmation responsibility belongs to Broadcast x Group; the account is audit data.
-// Target membership is validated by the service layer.
+// Target membership is enforced by a composite foreign key.
 Table broadcast_confirmations {
   broadcast_id uuid [not null, ref: > broadcasts.id]
   group_id uuid [not null, ref: > groups.id]
@@ -234,9 +234,15 @@ Table replies {
   group_id uuid [not null]
   author_id uuid [not null, ref: > accounts.id]
   content text [not null]
-  // NULL means a root reply; the service validates same-broadcast and same-group parents.
+  // NULL means a root reply; a composite foreign key enforces the parent thread.
   ref_id uuid [ref: > replies.id]
   created_at timestamp [not null, default: `timezone('utc', now())`]
+  indexes {
+    (id, broadcast_id, group_id) [unique]
+  }
 }
 
 Ref: replies.(broadcast_id, group_id) > broadcast_targets.(broadcast_id, group_id)
+
+Ref: replies.(ref_id, broadcast_id, group_id) > replies.(id, broadcast_id, group_id)
+Ref: broadcast_confirmations.(broadcast_id, group_id) > broadcast_targets.(broadcast_id, group_id)

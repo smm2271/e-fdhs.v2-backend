@@ -29,6 +29,10 @@ pytestmark = pytest.mark.skipif(
     reason="PostgreSQL integration tests require TEST_DB_HOST, TEST_DB_PORT, TEST_DB_NAME, TEST_DB_USER, and TEST_DB_PASSWORD",
 )
 
+def scope_migration():
+    return ScriptDirectory.from_config(Config(str(Path(__file__).parents[1] / "alembic.ini"))).get_revision("20261008_0007").module
+
+
 TABLES = ("broadcasts", "broadcast_targets", "broadcast_confirmations", "replies")
 DEADLINE = datetime(2026, 10, 5, 8, 30)  # 16:30 Asia/Taipei, stored as naive UTC.
 
@@ -119,11 +123,13 @@ async def test_broadcast_migration_downgrade_and_upgrade_round_trip() -> None:
     def round_trip(connection) -> None:
         existing = set(inspect(connection).get_table_names())
         with Operations.context(MigrationContext.configure(connection)):
+            scope_migration().downgrade()
             target_migration.downgrade()
             migration.downgrade()
             assert set(inspect(connection).get_table_names()) == existing - set(TABLES)
             migration.upgrade()
             target_migration.upgrade()
+            scope_migration().upgrade()
         assert set(inspect(connection).get_table_names()) == existing
         assert_schema_matches_models(connection)
 
@@ -251,6 +257,7 @@ async def test_target_migration_backfills_unique_legacy_target(broadcast_data) -
 
     def round_trip(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            scope_migration().downgrade()
             migration.downgrade()
             connection.execute(text("DELETE FROM broadcast_targets WHERE broadcast_id = :id AND group_id <> :group"),
                                {"id": broadcast_id, "group": group_id})
@@ -259,7 +266,9 @@ async def test_target_migration_backfills_unique_legacy_target(broadcast_data) -
                                {"id": reply_id, "broadcast": broadcast_id, "author": author_id})
             migration.upgrade()
             assert connection.scalar(text("SELECT group_id FROM replies WHERE id = :id"), {"id": reply_id}) == group_id
+            scope_migration().upgrade()
             assert_schema_matches_models(connection)
+            scope_migration().downgrade()
             migration.downgrade()
             assert connection.scalar(text("SELECT content FROM replies WHERE id = :id"), {"id": reply_id}) == "Legacy"
 
@@ -281,6 +290,7 @@ async def test_target_migration_rejects_ambiguous_legacy_replies(broadcast_data)
 
     def ambiguous(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            scope_migration().downgrade()
             migration.downgrade()
             connection.execute(text("INSERT INTO replies (id, broadcast_id, author_id, content) VALUES (:id, :broadcast, :author, 'Ambiguous')"),
                                {"id": uuid4(), "broadcast": broadcast_id, "author": author_id})
@@ -293,3 +303,22 @@ async def test_target_migration_rejects_ambiguous_legacy_replies(broadcast_data)
                 await connection.run_sync(ambiguous)
         finally:
             await transaction.rollback()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_cross_thread_parents_and_non_target_confirmations(broadcast_data):
+    session, broadcast, first, second, author, _ = broadcast_data
+    root = Reply(target=broadcast.targets[0], author=author, content="Root")
+    other = Broadcast(author=author, content="Other", ack_deadline_at=DEADLINE,
+                      targets=[BroadcastTarget(group=first)])
+    session.add_all([root, other])
+    await session.commit()
+    for broadcast_id, group_id in [(broadcast.id, second.id), (other.id, first.id)]:
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await session.execute(insert(Reply).values(id=uuid4(), broadcast_id=broadcast_id,
+                    group_id=group_id, author_id=author.id, content="Cross thread", ref_id=root.id))
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await session.execute(insert(BroadcastConfirmation).values(broadcast_id=other.id,
+                group_id=second.id, confirmed_by_account_id=author.id))

@@ -53,5 +53,14 @@ def test_broadcast_metadata_and_relationships() -> None:
 def test_broadcast_migration_is_the_only_head_and_follows_previous_revision() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["20261006_0006"]
-    assert scripts.get_revision("head").down_revision == "20261005_0005"
+    assert scripts.get_heads() == ["20261008_0007"]
+    assert scripts.get_revision("head").down_revision == "20261006_0006"
+
+
+def test_reply_parent_and_confirmation_have_composite_target_constraints():
+    replies = Base.metadata.tables["replies"]
+    parent = next(fk for fk in replies.foreign_key_constraints if fk.name == "fk_replies_parent_scope")
+    assert [e.parent.name for e in parent.elements] == ["ref_id", "broadcast_id", "group_id"]
+    assert [e.column.name for e in parent.elements] == ["id", "broadcast_id", "group_id"]
+    confirmations = Base.metadata.tables["broadcast_confirmations"]
+    assert any(fk.referred_table.name == "broadcast_targets" for fk in confirmations.foreign_key_constraints)

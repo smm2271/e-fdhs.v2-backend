@@ -266,7 +266,15 @@ class BroadcastConfirmation(Base):
         DateTime(timezone=False), nullable=False, server_default=UTC_NOW
     )
 
-    # Membership in this broadcast's targets is validated by the service layer.
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["broadcast_id", "group_id"],
+            ["broadcast_targets.broadcast_id", "broadcast_targets.group_id"],
+            name="fk_confirmations_target",
+        ),
+    )
+
+    # Target membership is also enforced by the database.
     broadcast: Mapped["Broadcast"] = relationship(back_populates="confirmations")
     group: Mapped["Group"] = relationship()
     confirmed_by_account: Mapped["Account"] = relationship()
@@ -279,6 +287,12 @@ class Reply(Base):
             ["broadcast_id", "group_id"],
             ["broadcast_targets.broadcast_id", "broadcast_targets.group_id"],
             name="fk_replies_broadcast_group_target",
+        ),
+        UniqueConstraint("id", "broadcast_id", "group_id", name="uq_replies_scope"),
+        ForeignKeyConstraint(
+            ["ref_id", "broadcast_id", "group_id"],
+            ["replies.id", "replies.broadcast_id", "replies.group_id"],
+            name="fk_replies_parent_scope",
         ),
     )
 
@@ -297,5 +311,8 @@ class Reply(Base):
         primaryjoin="foreign(Reply.broadcast_id) == Broadcast.id", viewonly=True
     )
     author: Mapped["Account"] = relationship()
-    # The service layer ensures that the parent belongs to this target thread.
-    referenced_reply: Mapped[Optional["Reply"]] = relationship(remote_side="Reply.id")
+    # Both the service and composite FK enforce the referenced target thread.
+    referenced_reply: Mapped[Optional["Reply"]] = relationship(
+        primaryjoin="foreign(Reply.ref_id) == remote(Reply.id)",
+        foreign_keys="Reply.ref_id", remote_side="Reply.id"
+    )
