@@ -66,3 +66,50 @@ can therefore require manual mapping if replies belong to multiple-target broadc
 
 Run `python -m pytest -q` with the `TEST_DB_*` variables configured for a disposable
 PostgreSQL test database. Integration tests migrate and truncate that database.
+
+## Broadcast HTTP API
+
+All endpoints use the existing `__Host-session` HttpOnly cookie dependency.
+Angular calls these endpoints through `/api/broadcasts...`; its proxy strips
+`/api` so the `/broadcasts` page route remains an Angular route. Production
+hosting must apply the same mapping and serve the Angular index for page routes.
+Requests never accept an account or position as authentication evidence.
+Students may omit `group_id`; it is derived from their session. A different
+student group is rejected. Teachers must specify `group_id` for reply reads/writes.
+
+| Method | Endpoint | Request |
+| --- | --- | --- |
+| GET | `/broadcasts` | Optional `group_id`, `week=YYYY-MM-DD`, `history=true`, `limit` (1–500), `offset` |
+| POST | `/broadcasts` | `{content, target_group_ids: UUID[]}` |
+| GET | `/broadcasts/pending-count` | Current Taipei display week only |
+| GET | `/broadcasts/{id}` | Optional `group_id` |
+| POST | `/broadcasts/{id}/confirmations` | `{group_id?: UUID}` (students can send `{}`) |
+| GET | `/broadcasts/{id}/replies` | Optional `group_id` (required for teachers) |
+| POST | `/broadcasts/{id}/replies` | `{content, group_id?: UUID, ref_id?: UUID}` |
+
+The feed returns `{items, current_user, pending_count}`. Each broadcast includes
+its sender, UTC timestamps with a timezone suffix, content, deadline, and visible
+`targets`. Each target includes its group, dynamic confirmation state, confirmer
+name/position/time, reply count, recursively nested replies, and `can_confirm` /
+`can_reply`. Mutations return the updated broadcast scoped to the affected target.
+`GET .../replies` returns that target's recursive reply tree. Content must be
+nonblank and at most 20,000 characters. OpenAPI schemas are available at `/docs`.
+
+The feed defaults to broadcasts **published** during the current Taipei
+Monday–Sunday week; `week` selects another display week, and `history=true`
+removes the publication-date filter. The badge always counts this week's
+unconfirmed targets for a student with confirmation permission, independent of
+pagination and confirmation deadlines. Historical broadcasts remain readable,
+confirmable, and replyable through their ID.
+
+Expected service errors map to 403 (permission), 404 (missing/invisible target),
+409 (duplicate confirmation / constraint conflict), or 422 (invalid input).
+Repeating a confirmation returns 409 and preserves the original actor/time.
+
+Migration `20261008_0007` adds a composite parent-reply foreign key and a
+confirmation-to-target foreign key. It does not rewrite existing records;
+invalid legacy references cause the transactional upgrade to fail. Apply with
+`alembic upgrade head`. Downgrade removes these added constraints only.
+
+`tests/test_broadcast_routes.py` tests actual login cookies and PostgreSQL through
+ASGI HTTP requests. These tests do not replace a browser acceptance check.

@@ -810,6 +810,8 @@ class BroadcastService(_BroadcastScopeService):
         actor = await self._actor(account_id)
         if actor.account_type != AccountType.TEACHER:
             raise AuthorizationError("Only teachers can create broadcasts")
+        if not content.strip():
+            raise ValidationError("Content must not be empty")
         targets = list(dict.fromkeys(target_group_ids))
         if not targets:
             raise ValidationError("A broadcast requires at least one target group")
@@ -907,9 +909,11 @@ class ReplyService(_BroadcastScopeService):
         content: str, ref_id: UUID | None = None,
     ) -> Reply:
         actor = await self._actor(account_id)
+        if not content.strip():
+            raise ValidationError("Content must not be empty")
         await self._target(broadcast_id, group_id)
         broadcast = await self._broadcast(broadcast_id)
-        if actor.id != broadcast.author_id:
+        if not (actor.account_type == AccountType.TEACHER and actor.id == broadcast.author_id):
             self._read_group(actor, group_id)
             if actor.account_type != AccountType.STUDENT:
                 raise AuthorizationError("Only the broadcast author or permitted target students can reply")
